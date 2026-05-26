@@ -18,7 +18,7 @@ static class Program
     const string GOOGLE_DRIVE_FILE_ID = "YOUR_GOOGLE_DRIVE_FILE_ID_HERE";
 
     // ── Версия приложения — меняйте при каждом обновлении в version.json ────────────
-    internal const string CURRENT_VERSION  = "1.0.0";
+    internal const string CURRENT_VERSION  = "1.0.1";
     // URL файла версии на GitHub (raw). Формат: {"version":"1.0.1","url":"https://.../AnydeskReinstaller.exe"}
     internal const string UPDATE_CHECK_URL = "https://raw.githubusercontent.com/kensh1qq/anydesk_reinstall/main/version.json";
 
