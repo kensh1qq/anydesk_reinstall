@@ -12,18 +12,25 @@ using System.Threading;
 using System.Windows.Forms;
 using Microsoft.Win32;
 
-// ── Точка входа ─────────────────────────────────────────────────────────────
+// �� ????? ????? �������������������������������������������������������������
 static class Program
 {
     const string GOOGLE_DRIVE_FILE_ID = "YOUR_GOOGLE_DRIVE_FILE_ID_HERE";
 
-    // ── Версия приложения — меняйте при каждом обновлении в version.json ────────────
-    internal const string CURRENT_VERSION  = "1.0.1";
-    // URL файла версии на GitHub (raw). Формат: {"version":"1.0.1","url":"https://.../AnydeskReinstaller.exe"}
+    // �� ?????? ?????????? - ??????? ?? <Version> ? .csproj, ????? ?? ?????????????????????.
+    //    ??? ?????? ?????????? ??????? ?? ? .csproj ? ? version.json. ������������
+    internal static readonly string CURRENT_VERSION =
+        typeof(Program).Assembly.GetName().Version is { } v
+            ? $"{v.Major}.{v.Minor}.{v.Build}"
+            : "1.0.3";
+    // URL ????? ?????? ?? GitHub (raw). ??????: {"version":"1.0.1","url":"https://.../AnydeskReinstaller.exe"}
     internal const string UPDATE_CHECK_URL = "https://raw.githubusercontent.com/kensh1qq/anydesk_reinstall/main/version.json";
 
     [DllImport("kernel32.dll")] static extern IntPtr GetConsoleWindow();
     [DllImport("user32.dll")]   static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+
+    // ?????? ??????? ????? ?? ???? ??????? (???? static ?? ???? ???????? ??? ???????).
+    static Mutex _singleInstance;
 
     [STAThread]
     static void Main()
@@ -35,6 +42,10 @@ static class Program
             catch { }
             return;
         }
+
+        // ?????? ???? ?????. Global\ - ??????? ????? ???? ??????? (????? ??? ???????????).
+        _singleInstance = new Mutex(true, @"Global\AnydeskReinstaller_SingleInstance", out bool isNew);
+        if (!isNew) return;
 
         IntPtr hwnd = GetConsoleWindow();
         if (hwnd != IntPtr.Zero) ShowWindow(hwnd, 0);
@@ -66,28 +77,24 @@ static class Program
     }
 }
 
-// ════════════════════════════════════════════════════════════════════════════
+// ����������������������������������������������������������������������������
 class MainForm : Form
 {
-    const int INTERVAL_HOURS = 168; // 1 неделя
-
     private readonly string _driveFileId;
 
-    // Состояние
+    // ?????????
     private volatile bool   isReinstalling = false;
     private volatile int    progress       = 0;
-    private volatile string statusText     = "Ожидание...";
-    private volatile string lastResult     = "—";
+    private volatile string statusText     = "????????...";
+    private volatile string lastResult     = "-";
     private readonly object _dateLock      = new();
     private DateTime? _lastRun = null;
-    private DateTime  _nextRun = DateTime.Now.AddHours(168);
     private DateTime? lastRun  { get { lock(_dateLock) return _lastRun;  } set { lock(_dateLock) _lastRun = value; } }
-    private DateTime  nextRun  { get { lock(_dateLock) return _nextRun;  } set { lock(_dateLock) _nextRun = value; } }
 
-    // UI
-    private ThermoPanel thermoPanel = null!;
-    private Label       lblStatusVal = null!, lblLastRunVal = null!, lblLastResVal = null!, lblNextRunVal = null!;
-    private RichTextBox txtLogs = null!;
+    // UI (???????? ??? Windows: ??????????? ????????)
+    private ProgressBar progressBar = null!;
+    private Label       lblStatusVal = null!, lblLastRunVal = null!, lblLastResVal = null!;
+    private TextBox     txtLogs = null!;
     private Button      btnReinstall = null!;
     private NotifyIcon  trayIcon = null!;
     private System.Windows.Forms.Timer uiTimer = null!;
@@ -96,154 +103,144 @@ class MainForm : Form
     private readonly object       logsLock  = new();
     private int lastProgress = -1;
 
+    // ?????? ?????????? (???? + ????); ???????? ???? ??? ?? ??????????? ??????? app.ico
+    private static readonly Icon AppIcon = LoadAppIcon();
+    private static Icon LoadAppIcon()
+    {
+        try
+        {
+            using var s = Assembly.GetExecutingAssembly().GetManifestResourceStream("app.ico");
+            if (s != null) return new Icon(s);
+        }
+        catch { }
+        return SystemIcons.Application;
+    }
+
     public MainForm(string driveFileId)
     {
         _driveFileId = driveFileId;
         InitializeTray();
         InitializeWindow();
         Thread.CurrentThread.Priority = ThreadPriority.BelowNormal;
-        Log($"❆ AnyDesk Reinstaller v{Program.CURRENT_VERSION} запущен. Иконка в трее.");
-        Log("❆ Автозапуск при старте Windows зарегистрирован.");
-        Log("⏱ Следующий цикл: " + nextRun.ToString("HH:mm  dd.MM.yyyy"));
-        StartMainScheduler();
-        CheckForUpdateInBackground(); // Проверяем обновление в фоне
+        Log($"? AnyDesk Reinstaller v{Program.CURRENT_VERSION} ???????. ?????? ? ????.");
+        Log("? ?????????? ??? ?????? Windows ???????????????.");
+        Log("? ????????????? - ???????, ??????? �?????????????? ??????�.");
+        CheckForUpdateInBackground(); // ????????? ?????????? ? ????
     }
 
-    // ── ТРЕЙ ─────────────────────────────────────────────────────────────────
+    // �� ???? �����������������������������������������������������������������
     private void InitializeTray()
     {
         trayIcon = new NotifyIcon
         {
-            Icon    = SystemIcons.Application,
+            Icon    = AppIcon,
             Text    = "AnyDesk Reinstaller",
             Visible = true
         };
         trayIcon.DoubleClick += (_, _) => ShowMainWindow();
 
-        // .NET 6+ WinForms: ContextMenuStrip вместо устаревшего ContextMenu
+        // .NET 6+ WinForms: ContextMenuStrip ?????? ??????????? ContextMenu
         var cms = new ContextMenuStrip();
-        cms.Items.Add("Открыть панель",          null, (_, _) => ShowMainWindow());
-        cms.Items.Add("Переустановить сейчас",   null, (_, _) => { if (!isReinstalling) TriggerReinstall(); });
+        cms.Items.Add("??????? ??????",          null, (_, _) => ShowMainWindow());
+        cms.Items.Add("?????????????? ??????",   null, (_, _) => { if (!isReinstalling) TriggerReinstall(); });
         cms.Items.Add(new ToolStripSeparator());
-        cms.Items.Add("Выход",                   null, (_, _) => ExitApp());
+        cms.Items.Add("?????",                   null, (_, _) => ExitApp());
         trayIcon.ContextMenuStrip = cms;
 
         trayIcon.ShowBalloonTip(3000, "AnyDesk Reinstaller",
-            "Программа запущена. Переустановка раз в неделю.", ToolTipIcon.Info);
+            "????????? ????????. ????????????? - ???????, ???????.", ToolTipIcon.Info);
     }
 
-    // ── ОКНО (скрыто по умолчанию) ───────────────────────────────────────────
+    // �� ???? (?????? ?? ?????????) �������������������������������������������
     private void InitializeWindow()
     {
-        Text = "AnyDesk Reinstaller";
-        Size = MinimumSize = MaximumSize = new Size(740, 520);
-        StartPosition = FormStartPosition.CenterScreen;
-        BackColor = Color.FromArgb(12, 12, 28);
-        ForeColor = Color.FromArgb(194, 202, 255);
-        Font = new Font("Segoe UI", 9.5F, FontStyle.Regular, GraphicsUnit.Point);
-        Icon = SystemIcons.Application;
-        ShowInTaskbar = false;
+        Text            = "AnyDesk Reinstaller";
+        Font            = new Font("Segoe UI", 9F);
+        FormBorderStyle = FormBorderStyle.FixedSingle;
+        MaximizeBox     = false;
+        ClientSize      = new Size(564, 432);
+        StartPosition   = FormStartPosition.CenterScreen;
+        Icon            = AppIcon;
+        ShowInTaskbar   = false;
 
         FormClosing += (_, e) =>
         {
             if (e.CloseReason == CloseReason.UserClosing) { e.Cancel = true; HideMainWindow(); }
         };
 
-        // Термометр с двойной буферизацией
-        thermoPanel = new ThermoPanel { Bounds = new Rectangle(20, 20, 110, 440) };
-        Controls.Add(thermoPanel);
-
-        // Заголовок
-        Controls.Add(new Label
+        // �� ?????? �?????????� ���������������������������������������
+        var grpState = new GroupBox { Text = "?????????", Bounds = new Rectangle(12, 8, 366, 150) };
+        grpState.Controls.Add(new Label
         {
-            Text      = "AnyDesk Reinstaller",
-            Bounds    = new Rectangle(150, 20, 560, 35),
-            Font      = new Font("Segoe UI Semibold", 18F, FontStyle.Bold),
-            ForeColor = Color.FromArgb(221, 228, 255)
-        });
-        Controls.Add(new Label
-        {
-            Text      = "Переустановка раз в неделю  •  Работает в трее  •  Автозапуск",
-            Bounds    = new Rectangle(152, 55, 560, 20),
-            Font      = new Font("Segoe UI", 8.5F),
-            ForeColor = Color.FromArgb(96, 105, 154)
-        });
-
-        // Карточки
-        Controls.AddRange(new Control[]
-        {
-            CreateCard("ПОСЛЕДНИЙ ЗАПУСК",  out lblLastRunVal, new Rectangle(150, 90, 165, 65)),
-            CreateCard("РЕЗУЛЬТАТ",         out lblLastResVal, new Rectangle(325, 90, 165, 65)),
-            CreateCard("СЛЕДУЮЩИЙ ЦИКЛ",    out lblNextRunVal, new Rectangle(500, 90, 210, 65))
-        });
-
-        // Лог
-        Controls.Add(new Label
-        {
-            Text      = "ЖУРНАЛ ОПЕРАЦИЙ",
-            Bounds    = new Rectangle(152, 175, 220, 20),
-            Font      = new Font("Segoe UI Bold", 8.5F, FontStyle.Bold),
-            ForeColor = Color.FromArgb(70, 75, 115)
-        });
-        txtLogs = new RichTextBox
-        {
-            Bounds      = new Rectangle(150, 198, 560, 205),
-            BackColor   = Color.FromArgb(6, 6, 15),
-            ForeColor   = Color.FromArgb(194, 202, 255),
-            BorderStyle = BorderStyle.FixedSingle,
-            ReadOnly    = true,
-            ScrollBars  = RichTextBoxScrollBars.Vertical,
-            Font        = new Font("Consolas", 9.5F)
-        };
-        Controls.Add(txtLogs);
-
-        // Статус
-        Controls.Add(new Label
-        {
-            Text      = "Статус:",
-            Bounds    = new Rectangle(150, 422, 55, 22),
-            Font      = new Font("Segoe UI Semibold", 10F, FontStyle.Bold),
-            ForeColor = Color.FromArgb(60, 65, 100)
+            Text = "??????? ??????:", Bounds = new Rectangle(14, 28, 100, 20),
+            ForeColor = SystemColors.GrayText
         });
         lblStatusVal = new Label
         {
-            Bounds    = new Rectangle(207, 422, 290, 22),
-            Font      = new Font("Segoe UI Semibold", 10F, FontStyle.Bold),
-            ForeColor = Color.FromArgb(123, 133, 200)
+            Text = "????????...", Bounds = new Rectangle(118, 28, 236, 20),
+            Font = new Font("Segoe UI Semibold", 9F, FontStyle.Bold)
         };
-        Controls.Add(lblStatusVal);
-
-        // Кнопка
-        btnReinstall = new Button
+        grpState.Controls.Add(lblStatusVal);
+        progressBar = new ProgressBar
         {
-            Text      = "⚡ Переустановить сейчас",
-            Bounds    = new Rectangle(505, 412, 205, 42),
-            FlatStyle = FlatStyle.Flat,
-            BackColor = Color.FromArgb(108, 99, 255),
-            ForeColor = Color.White,
-            Font      = new Font("Segoe UI Semibold", 10F, FontStyle.Bold),
-            Cursor    = Cursors.Hand
+            Bounds = new Rectangle(14, 56, 340, 24), Minimum = 0, Maximum = 100, Value = 0
         };
-        btnReinstall.FlatAppearance.BorderSize = 0;
+        grpState.Controls.Add(progressBar);
+        grpState.Controls.Add(new Label
+        {
+            Text = "????????????? AnyDesk ?? ??????, ?????? ? ????, ?????????? Windows.",
+            Bounds = new Rectangle(14, 92, 340, 44), ForeColor = SystemColors.GrayText
+        });
+        Controls.Add(grpState);
+
+        // �� ?????? �????????? ????????� ������������������������������
+        var grpInfo = new GroupBox { Text = "????????? ????????", Bounds = new Rectangle(386, 8, 166, 150) };
+        AddInfoRow(grpInfo, "????????? ??????:", out lblLastRunVal, 34);
+        AddInfoRow(grpInfo, "?????????:",         out lblLastResVal, 84);
+        Controls.Add(grpInfo);
+
+        // �� ?????? �?????? ????????� ���������������������������������
+        var grpLog = new GroupBox { Text = "?????? ????????", Bounds = new Rectangle(12, 165, 540, 210) };
+        txtLogs = new TextBox
+        {
+            Bounds     = new Rectangle(12, 22, 516, 176),
+            Multiline  = true,
+            ReadOnly   = true,
+            ScrollBars = ScrollBars.Vertical,
+            BackColor  = Color.White,
+            Font       = new Font("Consolas", 9F)
+        };
+        grpLog.Controls.Add(txtLogs);
+        Controls.Add(grpLog);
+
+        // �� ?????? ���������������������������������������������������
+        btnReinstall = new Button { Text = "?????????????? ??????", Bounds = new Rectangle(12, 388, 180, 32) };
         btnReinstall.Click += (_, _) => { if (!isReinstalling) TriggerReinstall(); };
         Controls.Add(btnReinstall);
 
-        // Незаметная подпись « by kensh1qq »
+        var btnHide = new Button { Text = "???????? ? ????", Bounds = new Rectangle(202, 388, 130, 32) };
+        btnHide.Click += (_, _) => HideMainWindow();
+        Controls.Add(btnHide);
+
+        var btnAbout = new Button { Text = "? ?????????", Bounds = new Rectangle(342, 388, 120, 32) };
+        btnAbout.Click += (_, _) => MessageBox.Show(
+            $"AnyDesk Reinstaller v{Program.CURRENT_VERSION}\nby kensh1qq\n\n" +
+            "????????????????? AnyDesk ?? ??????,\n???????? ? ????, ?????????? Windows.",
+            "? ?????????", MessageBoxButtons.OK, MessageBoxIcon.Information);
+        Controls.Add(btnAbout);
+
         Controls.Add(new Label
         {
-            Text      = "by kensh1qq",
-            Bounds    = new Rectangle(620, 468, 100, 16),
-            Font      = new Font("Segoe UI", 7F, FontStyle.Italic),
-            ForeColor = Color.FromArgb(28, 30, 55),  // почти невидимая на тёмном фоне
-            TextAlign = ContentAlignment.MiddleRight
+            Text = "by kensh1qq", Bounds = new Rectangle(466, 396, 86, 18),
+            ForeColor = SystemColors.GrayText, TextAlign = ContentAlignment.MiddleRight
         });
 
-        // UI таймер (запускается только при открытом окне)
+        // UI ?????? (??????????? ?????? ??? ???????? ????)
         uiTimer = new System.Windows.Forms.Timer { Interval = 1000 };
         uiTimer.Tick += UiTimer_Tick;
     }
 
-    // ── ПОКАЗАТЬ / СКРЫТЬ ────────────────────────────────────────────────────
+    // �� ???????? / ?????? ����������������������������������������������������
     private void ShowMainWindow()
     {
         ShowInTaskbar = true;
@@ -263,56 +260,40 @@ class MainForm : Form
 
     private void ExitApp() { trayIcon.Visible = false; Application.Exit(); }
 
-    // ── КАРТОЧКА ─────────────────────────────────────────────────────────────
-    private Panel CreateCard(string title, out Label val, Rectangle bounds)
+    // �� ?????? ???? (??????? ??????, ???????? ?????) ��������������������������
+    private static void AddInfoRow(Control parent, string title, out Label val, int y)
     {
-        var p = new Panel { Bounds = bounds, BackColor = Color.FromArgb(20, 20, 45) };
-        p.Paint += (_, e) =>
+        parent.Controls.Add(new Label
         {
-            using var pen = new Pen(Color.FromArgb(35, 255, 255, 255), 1);
-            e.Graphics.DrawRectangle(pen, 0, 0, p.Width - 1, p.Height - 1);
+            Text = title, Bounds = new Rectangle(12, y, 144, 16), ForeColor = SystemColors.GrayText
+        });
+        val = new Label
+        {
+            Text = "-", Bounds = new Rectangle(12, y + 16, 144, 20),
+            Font = new Font("Segoe UI Semibold", 9F, FontStyle.Bold)
         };
-        p.Controls.Add(new Label { Text = title, Bounds = new Rectangle(12, 10, bounds.Width - 24, 14),
-            Font = new Font("Segoe UI Bold", 7.5F, FontStyle.Bold), ForeColor = Color.FromArgb(70, 75, 115) });
-        val = new Label { Text = "—", Bounds = new Rectangle(10, 26, bounds.Width - 20, 28),
-            Font = new Font("Segoe UI Semibold", 11F, FontStyle.Bold), ForeColor = Color.FromArgb(138, 147, 212) };
-        p.Controls.Add(val);
-        return p;
+        parent.Controls.Add(val);
     }
 
-    // ── UI ТАЙМЕР ────────────────────────────────────────────────────────────
+    // �� UI ?????? ������������������������������������������������������������
     private void UiTimer_Tick(object? sender, EventArgs e)
     {
-        if (progress != lastProgress) { lastProgress = progress; thermoPanel.SetProgress(progress); }
+        if (progress != lastProgress)
+        {
+            lastProgress = progress;
+            progressBar.Value = Math.Max(0, Math.Min(100, progress));
+        }
 
         lblStatusVal.Text  = statusText;
-        lblLastRunVal.Text = lastRun.HasValue ? lastRun.Value.ToString("HH:mm  dd.MM") : "—";
+        lblLastRunVal.Text = lastRun.HasValue ? lastRun.Value.ToString("HH:mm  dd.MM") : "-";
         lblLastResVal.Text = lastResult;
 
-        if      (lastResult.Contains("Успешно")) lblLastResVal.ForeColor = Color.FromArgb(52, 211, 153);
-        else if (lastResult.Contains("Ошибка"))  lblLastResVal.ForeColor = Color.FromArgb(248, 113, 113);
-        else                                     lblLastResVal.ForeColor = Color.FromArgb(138, 147, 212);
+        // ?????? ????????? ??????????; ????????? - ??????????? ????????? ???
+        if      (lastResult.Contains("???????")) lblLastResVal.ForeColor = Color.Green;
+        else if (lastResult.Contains("??????"))  lblLastResVal.ForeColor = Color.Firebrick;
+        else                                     lblLastResVal.ForeColor = SystemColors.ControlText;
 
-        if (isReinstalling)
-        {
-            lblNextRunVal.Text     = "Выполняется...";
-            btnReinstall.Enabled   = false;
-            btnReinstall.BackColor = Color.FromArgb(37, 40, 64);
-        }
-        else
-        {
-            btnReinstall.Enabled   = true;
-            btnReinstall.BackColor = Color.FromArgb(108, 99, 255);
-            TimeSpan left = nextRun - DateTime.Now;
-            if (left.TotalSeconds > 0)
-            {
-                int d = (int)left.TotalDays, h = left.Hours, m = left.Minutes;
-                lblNextRunVal.Text = d > 0
-                    ? $"{d}д {h:00}ч {m:00}м"
-                    : $"{h:00}ч {m:00}м";
-            }
-            else lblNextRunVal.Text = "Запуск...";
-        }
+        btnReinstall.Enabled = !isReinstalling;
 
         FlushLogs();
     }
@@ -323,26 +304,10 @@ class MainForm : Form
         {
             if (logsQueue.Count > 0)
             {
-                foreach (var line in logsQueue) AppendColorLog(line);
+                foreach (var line in logsQueue) txtLogs.AppendText(line + Environment.NewLine);
                 logsQueue.Clear();
             }
         }
-    }
-
-    private void AppendColorLog(string text)
-    {
-        txtLogs.SelectionStart  = txtLogs.TextLength;
-        txtLogs.SelectionLength = 0;
-        if      (text.Contains("[✓]")) txtLogs.SelectionColor = Color.FromArgb(52, 211, 153);
-        else if (text.Contains("[✗]")) txtLogs.SelectionColor = Color.FromArgb(248, 113, 113);
-        else if (text.Contains("[►]")) txtLogs.SelectionColor = Color.FromArgb(96, 165, 250);
-        else if (text.Contains("✦"))   txtLogs.SelectionColor = Color.FromArgb(139, 92, 246);
-        else if (text.Contains("⏱"))   txtLogs.SelectionColor = Color.FromArgb(245, 158, 11);
-        else                           txtLogs.SelectionColor = Color.FromArgb(150, 155, 190);
-        txtLogs.AppendText(text + Environment.NewLine);
-        txtLogs.SelectionColor = txtLogs.ForeColor;
-        txtLogs.SelectionStart = txtLogs.TextLength;
-        txtLogs.ScrollToCaret();
     }
 
     private void Log(string line)
@@ -350,25 +315,9 @@ class MainForm : Form
         lock (logsLock) logsQueue.Add(DateTime.Now.ToString("HH:mm:ss") + "  " + line);
     }
 
-    // ── ПЛАНИРОВЩИК (1 неделя) ────────────────────────────────────────────────
+    // �� ?????? ????????????? (?????? ???????, ???????) ������������������������
     private void TriggerReinstall() =>
         new Thread(DoReinstall) { IsBackground = true, Name = "Reinstaller", Priority = ThreadPriority.BelowNormal }.Start();
-
-    private void StartMainScheduler()
-    {
-        new Thread(() =>
-        {
-            Thread.CurrentThread.Priority = ThreadPriority.Lowest;
-            TriggerReinstall();
-            while (true)
-            {
-                nextRun = DateTime.Now.AddHours(INTERVAL_HOURS);
-                Log("⏱ Следующий цикл: " + nextRun.ToString("HH:mm  dd.MM.yyyy"));
-                while (DateTime.Now < nextRun) Thread.Sleep(60000);
-                TriggerReinstall();
-            }
-        }) { IsBackground = true, Name = "Scheduler", Priority = ThreadPriority.Lowest }.Start();
-    }
 
     private void Step(int p, string s)
     {
@@ -377,78 +326,78 @@ class MainForm : Form
         try { if (trayIcon != null) trayIcon.Text = "AnyDesk: " + s[..Math.Min(s.Length, 60)]; } catch { }
     }
 
-    // ── ЛОГИКА ПЕРЕУСТАНОВКИ ──────────────────────────────────────────────────
+    // �� ?????? ????????????? ��������������������������������������������������
     private void DoReinstall()
     {
         if (isReinstalling) return;
         isReinstalling = true;
-        try { trayIcon.ShowBalloonTip(4000, "AnyDesk Reinstaller", "Начинаем переустановку AnyDesk...", ToolTipIcon.Info); } catch { }
+        try { trayIcon.ShowBalloonTip(4000, "AnyDesk Reinstaller", "???????? ????????????? AnyDesk...", ToolTipIcon.Info); } catch { }
 
         try
         {
             lastRun = DateTime.Now;
 
-            // ШАГ 1: Убиваем все процессы AnyDesk
-            Step(5, "Останавливаем процессы AnyDesk...");
-            Log("[►] Завершаем anydesk.exe");
+            // ??? 1: ??????? ??? ???????? AnyDesk
+            Step(5, "????????????? ???????? AnyDesk...");
+            Log("[] ????????? anydesk.exe");
             Run("taskkill", "/f /im anydesk.exe");
             Run("taskkill", "/f /im AnyDesk.exe");
             Thread.Sleep(1500);
 
-            // ШАГ 2: Останавливаем и удаляем службу
-            Step(12, "Останавливаем службу AnyDesk...");
-            Log("[►] net stop AnyDesk");
+            // ??? 2: ????????????? ? ??????? ??????
+            Step(12, "????????????? ?????? AnyDesk...");
+            Log("[] net stop AnyDesk");
             Run("net", "stop AnyDesk");
             Thread.Sleep(1000);
-            Log("[►] sc delete AnyDesk");
+            Log("[] sc delete AnyDesk");
             Run("sc", "delete AnyDesk");
             Thread.Sleep(1000);
 
-            // ШАГ 3: Полное удаление без GUI (ручное + реестр)
-            Step(25, "Удаляем файлы AnyDesk...");
+            // ??? 3: ?????? ???????? ??? GUI (?????? + ??????)
+            Step(25, "??????? ????? AnyDesk...");
             RemoveOld();
 
-            // ШАГ 4: Чистим реестр от старой версии
-            Step(38, "Чистим реестр...");
-            Log("[►] Удаляем записи реестра AnyDesk");
+            // ??? 4: ?????? ?????? ?? ?????? ??????
+            Step(38, "?????? ??????...");
+            Log("[] ??????? ?????? ??????? AnyDesk");
             CleanRegistry();
             Thread.Sleep(1000);
 
-            // ШАГ 5: Распаковываем НАШУ версию
-            Step(50, "Распаковываем установщик v6.0.8...");
+            // ??? 5: ????????????? ???? ??????
+            Step(50, "????????????? ?????????? v6.0.8...");
             string tmp = Path.Combine(Path.GetTempPath(), "AnyDesk_setup_temp.exe");
             if (File.Exists(tmp)) File.Delete(tmp);
             Extract(tmp);
-            Log("[✓] Установщик готов: " + tmp);
+            Log("[�] ?????????? ?????: " + tmp);
 
-            // ШАГ 6: Тихая установка НАШЕЙ версии (без --remove на tmp!)
-            Step(70, "Тихая установка v6.0.8...");
-            Log("[►] Запуск: --install --silent");
+            // ??? 6: ????? ????????? ????? ?????? (??? --remove ?? tmp!)
+            Step(70, "????? ????????? v6.0.8...");
+            Log("[] ??????: --install --silent");
             Run(tmp, "--install \"C:\\Program Files (x86)\\AnyDesk\" --start-with-win --silent");
             Thread.Sleep(5000);
 
-            // ШАГ 7: Блокируем автообновление
-            Step(88, "Блокируем автообновление...");
-            Log("[►] Отключаем auto-update AnyDesk");
+            // ??? 7: ????????? ??????????????
+            Step(88, "????????? ??????????????...");
+            Log("[] ????????? auto-update AnyDesk");
             BlockAnyDeskUpdate();
 
-            // ШАГ 8: Финальная очистка
-            Step(95, "Финальная очистка...");
+            // ??? 8: ????????? ???????
+            Step(95, "????????? ???????...");
             try { File.Delete(tmp); } catch { }
 
-            Step(100, "✓ Готово!");
-            Log("[✓] AnyDesk v6.0.8 успешно переустановлен!");
-            lastResult = "Успешно";
-            try { trayIcon.ShowBalloonTip(4000, "AnyDesk Reinstaller", "AnyDesk v6.0.8 установлен!", ToolTipIcon.Info); } catch { }
+            Step(100, "� ??????!");
+            Log("[�] AnyDesk v6.0.8 ??????? ??????????????!");
+            lastResult = "???????";
+            try { trayIcon.ShowBalloonTip(4000, "AnyDesk Reinstaller", "AnyDesk v6.0.8 ??????????!", ToolTipIcon.Info); } catch { }
             Thread.Sleep(3000);
-            Step(0, "Ожидание (1 неделя)...");
+            Step(0, "??????. ????????.");
         }
         catch (Exception ex)
         {
-            Log("[✗] Ошибка: " + ex.Message);
-            lastResult = "Ошибка";
-            Step(0, "Ошибка. Следующий цикл через неделю.");
-            try { trayIcon.ShowBalloonTip(5000, "AnyDesk — Ошибка", ex.Message, ToolTipIcon.Error); } catch { }
+            Log("[?] ??????: " + ex.Message);
+            lastResult = "??????";
+            Step(0, "?????? ??? ?????????????.");
+            try { trayIcon.ShowBalloonTip(5000, "AnyDesk - ??????", ex.Message, ToolTipIcon.Error); } catch { }
         }
         finally { isReinstalling = false; }
     }
@@ -464,7 +413,7 @@ class MainForm : Form
         catch { }
     }
 
-    // Удаляем файлы и папки AnyDesk вручную — без вызова --remove (он показывает GUI!)
+    // ??????? ????? ? ????? AnyDesk ??????? - ??? ?????? --remove (?? ?????????? GUI!)
     private void RemoveOld()
     {
         string[] dirs =
@@ -480,14 +429,14 @@ class MainForm : Form
         foreach (string dir in dirs)
         {
             if (!Directory.Exists(dir)) continue;
-            Log("   Удаляем папку: " + dir);
+            Log("   ??????? ?????: " + dir);
             try { Directory.Delete(dir, true); found = true; }
-            catch (Exception ex) { Log("   [!] Не удалось удалить: " + ex.Message); }
+            catch (Exception ex) { Log("   [!] ?? ??????? ???????: " + ex.Message); }
         }
-        if (!found) Log("   Существующих папок AnyDesk не найдено.");
+        if (!found) Log("   ???????????? ????? AnyDesk ?? ???????.");
     }
 
-    // Чистим реестр от старой версии AnyDesk (авто-старт, деинсталляция и т.д.)
+    // ?????? ?????? ?? ?????? ?????? AnyDesk (????-?????, ????????????? ? ?.?.)
     private void CleanRegistry()
     {
         string[] regKeys =
@@ -503,22 +452,22 @@ class MainForm : Form
             try
             {
                 Registry.LocalMachine.DeleteSubKeyTree(key, false);
-                Log("   Реестр очищен: HKLM\\" + key);
+                Log("   ?????? ??????: HKLM\\" + key);
             }
             catch { }
         }
 
-        // Убираем AnyDesk из автостарта (старая запись)
+        // ??????? AnyDesk ?? ?????????? (?????? ??????)
         try
         {
             using RegistryKey? run = Registry.LocalMachine.OpenSubKey(
                 @"SOFTWARE\Microsoft\Windows\CurrentVersion\Run", true);
             run?.DeleteValue("AnyDesk", false);
-            Log("   Удалён автостарт старой версии");
+            Log("   ?????? ????????? ?????? ??????");
         }
         catch { }
 
-        // Также из HKCU Run
+        // ????? ?? HKCU Run
         try
         {
             using RegistryKey? run = Registry.CurrentUser.OpenSubKey(
@@ -528,7 +477,7 @@ class MainForm : Form
         catch { }
     }
 
-    // Блокируем автообновление AnyDesk через реестр
+    // ????????? ?????????????? AnyDesk ????? ??????
     private static void BlockAnyDeskUpdate()
     {
         try
@@ -555,35 +504,35 @@ class MainForm : Form
         var asm = Assembly.GetExecutingAssembly();
         string[] names = { "AnyDesk-6-0-8-without_advertising.exe", "AnyDesk.exe", "anydesk.exe" };
 
-        // 1. Из встроенных ресурсов
+        // 1. ?? ?????????? ????????
         foreach (string rn in names)
         {
             using var stream = asm.GetManifestResourceStream(rn);
             if (stream == null) continue;
-            Log("[✓] Распаковываем из ресурсов EXE...");
+            Log("[�] ????????????? ?? ???????? EXE...");
             using var fs = new FileStream(outPath, FileMode.Create, FileAccess.Write);
             stream.CopyTo(fs);
             return;
         }
 
-        // 2. Ищем рядом с EXE
+        // 2. ???? ????? ? EXE
         string exeDir = AppContext.BaseDirectory;
         foreach (string name in names)
         {
             string lp = Path.Combine(exeDir, name);
             if (!File.Exists(lp)) continue;
             File.Copy(lp, outPath, true);
-            Log("[✓] Использован локальный файл: " + name);
+            Log("[�] ??????????? ????????? ????: " + name);
             return;
         }
 
-        // 3. Скачиваем — HttpClient вместо устаревшего WebRequest
+        // 3. ????????? - HttpClient ?????? ??????????? WebRequest
         bool useGDrive = !string.IsNullOrEmpty(_driveFileId) && !_driveFileId.Contains("YOUR_GOOGLE_DRIVE");
         string url = useGDrive
             ? $"https://drive.google.com/uc?export=download&id={_driveFileId}"
             : "https://download.anydesk.com/AnyDesk.exe";
 
-        Log("[►] Скачиваем установщик: " + url);
+        Log("[] ????????? ??????????: " + url);
 
         using var client = new HttpClient();
         client.Timeout = TimeSpan.FromMinutes(5);
@@ -602,72 +551,72 @@ class MainForm : Form
             fileStream.Write(buf, 0, read);
             got += read;
             if (total > 0)
-                Step(43 + (int)(got * 14 / total), $"Загрузка: {got * 100 / total}% ({got / 1048576.0:F1} МБ)");
+                Step(43 + (int)(got * 14 / total), $"????????: {got * 100 / total}% ({got / 1048576.0:F1} ??)");
             else
-                Step(43, $"Загрузка: {got / 1048576.0:F1} МБ...");
+                Step(43, $"????????: {got / 1048576.0:F1} ??...");
         }
-        Log("[✓] Скачивание завершено");
+        Log("[�] ?????????? ?????????");
     }
 
-    // ════════════════════════════════════════════════════════════════════════
-    //  АВТО-ОБНОВЛЕНИЕ ЛАУНЧЕРА
-    //  version.json на GitHub: {"version":"1.0.1","url":"https://.../AnydeskReinstaller.exe"}
-    // ════════════════════════════════════════════════════════════════════════
+    // ������������������������������������������������������������������������
+    //  ????-?????????? ????????
+    //  version.json ?? GitHub: {"version":"1.0.1","url":"https://.../AnydeskReinstaller.exe"}
+    // ������������������������������������������������������������������������
     private void CheckForUpdateInBackground()
     {
         new Thread(() =>
         {
             Thread.CurrentThread.Priority = ThreadPriority.Lowest;
-            Thread.Sleep(5000); // Небольшая задержка — пусть UI сначала поднимется
+            Thread.Sleep(5000); // ????????? ???????? - ????? UI ??????? ??????????
 
             try
             {
-                Log("[►] Проверяем наличие обновлений лаунчера...");
+                Log("[] ????????? ??????? ?????????? ????????...");
 
                 using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(15) };
                 client.DefaultRequestHeaders.UserAgent.ParseAdd("AnydeskReinstaller/" + Program.CURRENT_VERSION);
 
                 string json = client.GetStringAsync(Program.UPDATE_CHECK_URL).Result;
 
-                // Парсим JSON вручную (без зависимостей): {"version":"X.Y.Z","url":"..."}
+                // ?????? JSON ??????? (??? ????????????): {"version":"X.Y.Z","url":"..."}
                 string remoteVersion = ExtractJsonValue(json, "version");
                 string downloadUrl   = ExtractJsonValue(json, "url");
 
                 if (string.IsNullOrEmpty(remoteVersion) || string.IsNullOrEmpty(downloadUrl))
                 {
-                    Log("[!] Не удалось разобрать version.json");
+                    Log("[!] ?? ??????? ????????? version.json");
                     return;
                 }
 
                 if (CompareVersions(remoteVersion, Program.CURRENT_VERSION) <= 0)
                 {
-                    Log($"[✓] Версия актуальна (v{Program.CURRENT_VERSION})");
+                    Log($"[�] ?????? ????????? (v{Program.CURRENT_VERSION})");
                     return;
                 }
 
-                // Есть обновление!
-                Log($"[✓] Доступно обновление: v{Program.CURRENT_VERSION} → v{remoteVersion}");
-                try { trayIcon.ShowBalloonTip(5000, "AnyDesk Reinstaller — Обновление",
-                    $"Скачиваем v{remoteVersion}...", ToolTipIcon.Info); } catch { }
+                // ???? ??????????!
+                Log($"[�] ???????? ??????????: v{Program.CURRENT_VERSION}  v{remoteVersion}");
+                try { trayIcon.ShowBalloonTip(5000, "AnyDesk Reinstaller - ??????????",
+                    $"????????? v{remoteVersion}...", ToolTipIcon.Info); } catch { }
 
-                // Скачиваем новый EXE во временную папку
+                // ????????? ????? EXE ?? ????????? ?????
                 string tmpExe = Path.Combine(Path.GetTempPath(), $"AnydeskReinstaller_v{remoteVersion}.exe");
                 DownloadUpdate(downloadUrl, tmpExe, remoteVersion);
 
-                // Применяем обновление
+                // ????????? ??????????
                 ApplyUpdate(tmpExe, remoteVersion);
             }
             catch (Exception ex)
             {
-                // Не показываем ошибку пользователю — обновление необязательно
-                Log("[!] Проверка обновлений недоступна: " + ex.Message);
+                // ?? ?????????? ?????? ???????????? - ?????????? ?????????????
+                Log("[!] ???????? ?????????? ??????????: " + ex.Message);
             }
         }) { IsBackground = true, Name = "UpdateChecker" }.Start();
     }
 
     private void DownloadUpdate(string url, string outPath, string version)
     {
-        Log($"[►] Скачиваем обновление v{version}...");
+        Log($"[] ????????? ?????????? v{version}...");
 
         using var client = new HttpClient { Timeout = TimeSpan.FromMinutes(10) };
         client.DefaultRequestHeaders.UserAgent.ParseAdd("AnydeskReinstaller/" + Program.CURRENT_VERSION);
@@ -684,11 +633,11 @@ class MainForm : Form
         {
             fs.Write(buf, 0, read);
             got += read;
-            string pct = total > 0 ? $"{got * 100 / total}%" : $"{got / 1048576.0:F1} МБ";
-            Log($"[►] Обновление: {pct}");
+            string pct = total > 0 ? $"{got * 100 / total}%" : $"{got / 1048576.0:F1} ??";
+            Log($"[] ??????????: {pct}");
         }
 
-        Log($"[✓] Обновление v{version} скачано");
+        Log($"[�] ?????????? v{version} ???????");
     }
 
     private void ApplyUpdate(string newExePath, string version)
@@ -697,7 +646,7 @@ class MainForm : Form
         {
             string currentExe = Environment.ProcessPath!;
 
-            // PowerShell скрипт: ждёт закрытия текущего процесса → заменяет файл → перезапускает
+            // PowerShell ??????: ???? ???????? ???????? ????????  ???????? ????  ?????????????
             string ps = $@"
 $pid_to_wait = {Environment.ProcessId}
 $deadline = (Get-Date).AddSeconds(30)
@@ -724,21 +673,29 @@ try {{
                 CreateNoWindow      = true
             });
 
-            // Уведомляем и закрываем — PowerShell перезапустит нас
+            // ?????????? ? ????????? - PowerShell ???????????? ???
             trayIcon.ShowBalloonTip(3000, "AnyDesk Reinstaller",
-                $"Применяем обновление v{version}. Перезапуск...", ToolTipIcon.Info);
+                $"????????? ?????????? v{version}. ??????????...", ToolTipIcon.Info);
             Thread.Sleep(3500);
 
-            // Выходим — PowerShell нас перезапустит
-            Application.Exit();
+            // ??????? - PowerShell ??? ????????????.
+            // Application.Exit() ?????? ?????????? ?? UI-??????, ??????? ???????? ????? ?????.
+            try
+            {
+                if (IsHandleCreated)
+                    BeginInvoke((Action)(() => { trayIcon.Visible = false; Application.Exit(); }));
+                else
+                    Application.Exit();
+            }
+            catch { Application.Exit(); }
         }
         catch (Exception ex)
         {
-            Log("[✗] Не удалось применить обновление: " + ex.Message);
+            Log("[?] ?? ??????? ????????? ??????????: " + ex.Message);
         }
     }
 
-    // Простой парсер JSON-значения по ключу (без внешних зависимостей)
+    // ??????? ?????? JSON-???????? ?? ????? (??? ??????? ????????????)
     private static string ExtractJsonValue(string json, string key)
     {
         string search = $"\"{key}\"";
@@ -752,7 +709,7 @@ try {{
         return end < 0 ? "" : json.Substring(idx + 1, end - idx - 1);
     }
 
-    // Сравнение версий вида "1.2.3". Возвращает > 0 если a > b
+    // ????????? ?????? ???? "1.2.3". ?????????? > 0 ???? a > b
     private static int CompareVersions(string a, string b)
     {
         try
@@ -766,97 +723,5 @@ try {{
 }
 
 
-// ════════════════════════════════════════════════════════════════════════════
-//  ТЕРМОМЕТР (Panel с DoubleBuffered = перерисовка только при изменении)
-// ════════════════════════════════════════════════════════════════════════════
-class ThermoPanel : Panel
-{
-    private int _progress = 0;
+// (ThermoPanel ?????? - ??????? ?? ??????????? ProgressBar ??? ????????? ????)
 
-    public ThermoPanel()
-    {
-        DoubleBuffered = true;
-        SetStyle(ControlStyles.OptimizedDoubleBuffer |
-                 ControlStyles.AllPaintingInWmPaint  |
-                 ControlStyles.UserPaint, true);
-        BackColor = Color.Transparent;
-    }
-
-    public void SetProgress(int value)
-    {
-        if (_progress == value) return;
-        _progress = value;
-        Invalidate();
-    }
-
-    protected override void OnPaint(PaintEventArgs e)
-    {
-        Graphics g = e.Graphics;
-        g.SmoothingMode = SmoothingMode.AntiAlias;
-
-        int w = Width, h = Height;
-        int bulbRadius = 24, bulbX = w / 2, bulbY = h - bulbRadius - 15;
-        int tubeW = 16, tubeH = h - bulbRadius * 2 - 50;
-        int tubeX = (w - tubeW) / 2, tubeY = 20;
-
-        // Стеклянная трубка
-        using (var path = new GraphicsPath())
-        {
-            path.AddArc(tubeX, tubeY, tubeW, tubeW, 180, 180);
-            path.AddLine(tubeX + tubeW, tubeY + tubeW / 2, tubeX + tubeW, bulbY - 5);
-            path.AddArc(bulbX - bulbRadius, bulbY - bulbRadius, bulbRadius * 2, bulbRadius * 2, -100, 380);
-            path.AddLine(tubeX, bulbY - 5, tubeX, tubeY + tubeW / 2);
-            path.CloseAllFigures();
-            using (var bg = new SolidBrush(Color.FromArgb(15, 255, 255, 255))) g.FillPath(bg, path);
-            using (var bp = new Pen(Color.FromArgb(30, 255, 255, 255), 1.5F))  g.DrawPath(bp, path);
-        }
-
-        // Деления шкалы
-        int stepH = tubeH / 4;
-        using var scalePen   = new Pen(Color.FromArgb(45, 255, 255, 255), 1);
-        using var scaleFont  = new Font("Segoe UI Semibold", 7.5F);
-        using var scaleBrush = new SolidBrush(Color.FromArgb(40, 45, 75));
-        for (int i = 0; i <= 4; i++)
-        {
-            int y = tubeY + tubeW / 2 + stepH * i;
-            g.DrawLine(scalePen, tubeX - 6, y, tubeX - 1, y);
-            g.DrawString((100 - i * 25).ToString(), scaleFont, scaleBrush, tubeX - 28, y - 6);
-        }
-
-        // Цвет жидкости
-        Color cs, ce;
-        if      (_progress == 0)   { cs = Color.FromArgb(108, 99, 255); ce = Color.FromArgb(162, 89, 247); }
-        else if (_progress <= 30)  { cs = Color.FromArgb(59, 130, 246); ce = Color.FromArgb(6, 182, 212);  }
-        else if (_progress <= 65)  { cs = Color.FromArgb(245, 158, 11); ce = Color.FromArgb(239, 68, 68);  }
-        else                       { cs = Color.FromArgb(52, 211, 153); ce = Color.FromArgb(16, 185, 129); }
-
-        // Колба
-        using (var bb = new SolidBrush(cs))
-            g.FillEllipse(bb, bulbX - (bulbRadius - 5), bulbY - (bulbRadius - 5),
-                (bulbRadius - 5) * 2, (bulbRadius - 5) * 2);
-
-        // Заполнение трубки
-        int fillH = (int)(tubeH * (_progress / 100.0));
-        if (fillH > 1)
-        {
-            int fillY = tubeY + tubeW / 2 + tubeH - fillH;
-            var fr    = new Rectangle(tubeX + 3, fillY, tubeW - 6, fillH + 10);
-            if (fr.Width > 0 && fr.Height > 0)
-            {
-                // .NET 8: LinearGradientBrush через два Point, не Rectangle+Mode
-                using var fb = new LinearGradientBrush(
-                    new Point(fr.Left, fr.Bottom), new Point(fr.Left, fr.Top), ce, cs);
-                g.FillRectangle(fb, fr);
-                using var eb = new SolidBrush(ce);
-                g.FillEllipse(eb, tubeX + 3, fillY - 3, tubeW - 6, tubeW - 6);
-            }
-        }
-
-        // Процент
-        string pct = $"{_progress}%";
-        using var pf = new Font("Segoe UI Bold", 13F, FontStyle.Bold);
-        using var pb = new SolidBrush(Color.FromArgb(176, 186, 255));
-        SizeF sz = g.MeasureString(pct, pf);
-        g.DrawString(pct, pf, pb, (w - sz.Width) / 2, bulbY - 7);
-    }
-}
